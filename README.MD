@@ -16,11 +16,12 @@ Documentation on how to use the [doubly linked list](https://litux.nl/mirror/ker
 ## Build & environment
 The project (see `Makefile`) includes a `tests` target. To run tests while working on the problem, you can build and execute them as follows::
 ```
-make all && ./tests
+$ make all
+$ ./tests
 ```
 The code will be tested for buildability and functionality using the GCC 12.4.0 compiler. For final verification, you can use the Docker image gcc:12.4 by running the following command:
 ```
-docker run --rm -v "$PWD":/usr/src/test_problem -w /usr/src/test_problem gcc:12.4 /bin/bash -c "make all && ./tests"
+$ docker run --rm -v "$PWD":/usr/src/test_problem -w /usr/src/test_problem gcc:12.4 /bin/bash -c "make all && ./tests"
 ```
 
 ## Misc
