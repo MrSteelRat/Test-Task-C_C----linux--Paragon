@@ -1,177 +1,197 @@
 #include "cache_lru.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
-// Node structure for doubly linked list
-typedef struct node {
+// Structure for a cache element
+struct Node {
     int key;
     int value;
-    struct node* prev;
-    struct node* next;
-} Node;
+    struct Node *next;
+    struct Node *prev;
+};
 
-// LRU cache structure
+// Structure for a hash table element
+typedef struct hashmap {
+    int key;
+    struct Node *node;
+} Hashmap;
+
+// Structure for LRU cache
 struct cache_lru {
     int capacity;
     int size;
-    Node *head;
-    Node *tail;
-    // Hash table for quick look-up (chaining for collisions)
-    Node **hash_table;
+    struct Node *head;
+    struct Node *tail;
+    Hashmap **map;
+    int map_size;
 };
 
-static int hash(int key, int capacity) {
-    return key % capacity;
+// Hash function
+int hash_one(int key, int M) {
+    return key % M;
 }
 
-static void move_to_front(Cache_lru *cache, Node *node) {
-    if (cache->head == node) return;
+int hash_two(int key, int M) {
+    return 1 + (key % (M - 1));
+}
 
-    // Detach the node
-    if (node->prev) node->prev->next = node->next;
-    if (node->next) node->next->prev = node->prev;
-
-    if (cache->tail == node) {
-        cache->tail = node->prev;
-    }
-
-    // Move the node to the front
-    node->next = cache->head;
-    node->prev = NULL;
-    if (cache->head) cache->head->prev = node;
-    cache->head = node;
-
-    if (!cache->tail) {
-        cache->tail = node;
+// Initializing a hash table
+void init_table(Hashmap **hashmap, int M) {
+    for (int i = 0; i < M; i++) {
+        hashmap[i] = NULL;
     }
 }
 
-// Function to remove a node from the list
-static void remove_node(Cache_lru *cache, Node *node) {
-    if (node->prev) node->prev->next = node->next;
-    if (node->next) node->next->prev = node->prev;
+// Getting a value by key from a hash table
+Hashmap *get(int key, Hashmap **hashmap, int M) {
+    int hash1 = hash_one(key, M);
+    int hash2 = hash_two(key, M);
+    int i = 0;
 
-    if (cache->head == node) cache->head = node->next;
-    if (cache->tail == node) cache->tail = node->prev;
-
-    free(node);
-}
-
-// Eviction function: Remove the least recently used node (from the tail)
-static void evict(Cache_lru *cache) {
-    if (cache->tail) {
-        Node *node = cache->tail;
-        remove_node(cache, node);
-
-        // Remove the node from the hash table
-        int index = hash(node->key, cache->capacity);
-        Node *prev_node = cache->hash_table[index];
-        if (prev_node == node) {
-            cache->hash_table[index] = NULL;
-        } else {
-            // Handle collision: find the node and remove it from the chain
-            while (prev_node && prev_node->next != node) {
-                prev_node = prev_node->next;
-            }
-            if (prev_node) {
-                prev_node->next = node->next;
-            }
+    while (1) {
+        Hashmap *currentPair = hashmap[(hash1 + i * hash2) % M];
+        if (currentPair == NULL) {
+            return NULL;
         }
-
-        cache->size--;
+        if (currentPair->key == key) {
+            return currentPair;
+        }
+        i++;
     }
 }
 
-Cache_lru *cache_lru_create(int capacity) {
-    if (capacity <= 0) return NULL;
+// Inserting into a hash table
+void insert_hash(int key, Hashmap **hashmap, Hashmap *pair, int M) {
+    int hash1 = hash_one(key, M);
+    int index = hash1;
 
-    Cache_lru *cache = (Cache_lru *)malloc(sizeof(Cache_lru));
-    if (!cache) return NULL;
+    if (hashmap[index] != NULL) {
+        int index2 = hash_two(key, M);
+        int i = 0;
+        while (1) {
+            int newIndex = (index + i * index2) % M;
+            if (hashmap[newIndex] == NULL) {
+                hashmap[newIndex] = pair;
+                break;
+            }
+            i++;
+        }
+    } else {
+        hashmap[index] = pair;
+    }
+}
 
+// Removing from a hash table
+void remove_hash(int key, Hashmap **hashmap, int M) {
+    int hash1 = hash_one(key, M);
+    int hash2 = hash_two(key, M);
+    int i = 0;
+    while (1) {
+        Hashmap *currentPair = hashmap[(hash1 + i * hash2) % M];
+        if (currentPair == NULL) {
+            return;
+        }
+        if (currentPair->key == key) {
+            hashmap[(hash1 + i * hash2) % M] = NULL;
+        }
+        i++;
+    }
+}
+
+// Removing a node from the cache
+void delete_node(struct cache_lru *cache, struct Node *rm) {
+    if (rm == NULL) return;
+    
+    if (rm->prev != NULL) {
+        rm->prev->next = rm->next;
+    } else {
+        cache->head = rm->next;
+    }
+
+    if (rm->next != NULL) {
+        rm->next->prev = rm->prev;
+    } else {
+        cache->tail = rm->prev;
+    }
+}
+
+// Adding a node to the beginning of the list
+void put_on_top(struct cache_lru *cache, struct Node *newNode) {
+    newNode->next = cache->head;
+    newNode->prev = NULL;
+
+    if (cache->head != NULL) {
+        cache->head->prev = newNode;
+    }
+
+    cache->head = newNode;
+
+    if (cache->tail == NULL) {
+        cache->tail = newNode;
+    }
+}
+
+// Function for creating a cache
+struct cache_lru *cache_lru_create(int capacity) {
+    struct cache_lru *cache = (struct cache_lru *)malloc(sizeof(struct cache_lru));
     cache->capacity = capacity;
     cache->size = 0;
     cache->head = NULL;
     cache->tail = NULL;
-
-    cache->hash_table = (Node **)calloc(capacity, sizeof(Node *));
-    if (!cache->hash_table) {
-        free(cache);
-        return NULL;
-    }
-
+    
+    cache->map_size = capacity * 2;
+    cache->map = (Hashmap **)malloc(sizeof(Hashmap *) * cache->map_size);
+    init_table(cache->map, cache->map_size);
+    
     return cache;
 }
 
-void cache_lru_destroy(Cache_lru **cache) {
-    if (!cache || !(*cache)) return;
-
-    Node *current = (*cache)->head;
-    while (current) {
-        Node *next = current->next;
-        free(current);
-        current = next;
-    }
-
-    free((*cache)->hash_table);
+// Destroying the cache
+void cache_lru_destroy(struct cache_lru **cache) {
     free(*cache);
     *cache = NULL;
 }
 
-void cache_lru_put(Cache_lru *cache, int key, int value) {
-    if (!cache) return;
+// Function for adding an element to the cache
+void cache_lru_put(struct cache_lru *cache, int key, int value) {
+    Hashmap *currentHash = get(key, cache->map, cache->map_size);
 
-    int index = hash(key, cache->capacity);
-    Node *node = cache->hash_table[index];
-
-    // Search for the node in the hash table chain
-    while (node && node->key != key) {
-        node = node->next;
-    }
-
-    if (node) {
-        // If the key exists, update the value and move it to the front
-        node->value = value;
-        move_to_front(cache, node);
+    if (currentHash != NULL) {
+        currentHash->node->value = value;
+        delete_node(cache, currentHash->node);
+        put_on_top(cache, currentHash->node);
     } else {
-        // If the key doesn't exist, create a new node
-        if (cache->size == cache->capacity) {
-            evict(cache); // Remove the least recently used element
+        if (cache->size >= cache->capacity) {
+            remove_hash(cache->tail->key, cache->map, cache->map_size);
+            delete_node(cache, cache->tail);
+            cache->size--;
         }
-
-        node = (Node *)malloc(sizeof(Node));
-        node->key = key;
-        node->value = value;
-        node->prev = NULL;
-        node->next = cache->head;
-
-        if (cache->head) cache->head->prev = node;
-        cache->head = node;
-
-        if (!cache->tail) {
-            cache->tail = node;
-        }
-
-        // Insert the node into the hash table chain
-        node->next = cache->hash_table[index];
-        cache->hash_table[index] = node;
+        struct Node *newNode = (struct Node *)malloc(sizeof(struct Node));
+        newNode->key = key;
+        newNode->value = value;
+        newNode->next = NULL;
+        newNode->prev = NULL;
+        
+        Hashmap *hash = (Hashmap *)malloc(sizeof(Hashmap));
+        hash->key = key;
+        hash->node = newNode;
+        
+        insert_hash(key, cache->map, hash, cache->map_size);
+        put_on_top(cache, newNode);
         cache->size++;
     }
 }
 
-int cache_lru_get(Cache_lru *cache, int key) {
-    if (!cache) return -1;
-
-    int index = hash(key, cache->capacity);
-    Node *node = cache->hash_table[index];
-
-    // Search for the node in the hash table chain
-    while (node && node->key != key) {
-        node = node->next;
+// Function for getting an element from the cache
+int cache_lru_get(struct cache_lru *cache, int key) {
+    Hashmap *currentHash = get(key, cache->map, cache->map_size);
+    
+    if (currentHash != NULL) {
+        delete_node(cache, currentHash->node);
+        put_on_top(cache, currentHash->node);
+        return currentHash->node->value;
+    } else {
+        return -1;
     }
-
-    if (!node) return -1;
-
-    // Move the found node to the front (mark it as recently used)
-    move_to_front(cache, node);
-    return node->value;
 }
