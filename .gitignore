@@ -3,3 +3,4 @@ liblru.a
 tests.exe
 tests.o
 linux-utils/rbtree.o
+tests
