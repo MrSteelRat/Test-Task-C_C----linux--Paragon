@@ -1,197 +1,128 @@
 #include "cache_lru.h"
-#include <stdlib.h>
+
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
-#include <string.h>
+#include <stdlib.h>
 
-// Structure for a cache element
-struct Node {
-    int key;
-    int value;
-    struct Node *next;
-    struct Node *prev;
+#include "linux-utils/list.h"
+#include "linux-utils/rbtree.h"
+
+// Cache node structure
+struct cache_node {
+  int key;
+  int value;
+  struct rb_node rb_node;     // Red-black tree node
+  struct list_head lru_list;  // Doubly linked list node
 };
 
-// Structure for a hash table element
-typedef struct hashmap {
-    int key;
-    struct Node *node;
-} Hashmap;
-
-// Structure for LRU cache
+// LRU Cache structure
 struct cache_lru {
-    int capacity;
-    int size;
-    struct Node *head;
-    struct Node *tail;
-    Hashmap **map;
-    int map_size;
+  int capacity;
+  int size;
+  struct rb_root rb_root;     // Root of the red-black tree
+  struct list_head lru_head;  // Head of the LRU list
 };
 
-// Hash function
-int hash_one(int key, int M) {
-    return key % M;
+// Helper function for searching a key in the RB tree
+static struct cache_node* cache_lru_find(struct cache_lru* cache, int key) {
+  struct rb_node* node = cache->rb_root.rb_node;
+  while (node) {
+    struct cache_node* data = rb_entry(node, struct cache_node, rb_node);
+    if (key < data->key)
+      node = node->rb_left;
+    else if (key > data->key)
+      node = node->rb_right;
+    else
+      return data;
+  }
+  return NULL;
 }
 
-int hash_two(int key, int M) {
-    return 1 + (key % (M - 1));
+// Add a new node to the RB tree
+static void cache_lru_add_rb(
+  struct cache_lru* cache, struct cache_node* new_node) {
+  struct rb_node **link = &cache->rb_root.rb_node, *parent = NULL;
+  while (*link) {
+    struct cache_node* data = rb_entry(*link, struct cache_node, rb_node);
+    parent = *link;
+    if (new_node->key < data->key)
+      link = &(*link)->rb_left;
+    else
+      link = &(*link)->rb_right;
+  }
+  rb_link_node(&new_node->rb_node, parent, link);
+  rb_insert_color(&new_node->rb_node, &cache->rb_root);
 }
 
-// Initializing a hash table
-void init_table(Hashmap **hashmap, int M) {
-    for (int i = 0; i < M; i++) {
-        hashmap[i] = NULL;
+// Remove a node from the RB tree
+static void cache_lru_remove_rb(
+  struct cache_lru* cache, struct cache_node* node) {
+  rb_erase(&node->rb_node, &cache->rb_root);
+}
+
+// Create a new LRU cache
+struct cache_lru* cache_lru_create(int capacity) {
+  struct cache_lru* cache = malloc(sizeof(struct cache_lru));
+  cache->capacity = capacity;
+  cache->size = 0;
+  cache->rb_root = RB_ROOT;
+  INIT_LIST_HEAD(&cache->lru_head);
+  return cache;
+}
+
+// Destroy the LRU cache
+void cache_lru_destroy(struct cache_lru** cache) {
+  struct cache_node* node;
+  struct list_head *pos, *tmp;
+  list_for_each_safe(pos, tmp, &(*cache)->lru_head) {
+    node = list_entry(pos, struct cache_node, lru_list);
+    list_del(pos);
+    cache_lru_remove_rb(*cache, node);
+    free(node);
+  }
+  free(*cache);
+  *cache = NULL;
+}
+
+// Put a key-value pair in the cache
+void cache_lru_put(struct cache_lru* cache, int key, int value) {
+  struct cache_node* node = cache_lru_find(cache, key);
+  if (node) {
+    // Update value and move to front of LRU list
+    node->value = value;
+    list_del(&node->lru_list);
+    list_add(&node->lru_list, &cache->lru_head);
+  } else {
+    // If the cache is full, evict the least recently used item
+    if (cache->size >= cache->capacity) {
+      struct list_head* lru_tail = cache->lru_head.prev;
+      node = list_entry(lru_tail, struct cache_node, lru_list);
+      list_del(lru_tail);
+      cache_lru_remove_rb(cache, node);
+      free(node);
+      cache->size--;
     }
+    // Add new node to the cache
+    node = malloc(sizeof(struct cache_node));
+    node->key = key;
+    node->value = value;
+    cache_lru_add_rb(cache, node);
+    list_add(&node->lru_list, &cache->lru_head);
+    cache->size++;
+  }
 }
 
-// Getting a value by key from a hash table
-Hashmap *get(int key, Hashmap **hashmap, int M) {
-    int hash1 = hash_one(key, M);
-    int hash2 = hash_two(key, M);
-    int i = 0;
+// Get a value by key from the cache
+int cache_lru_get(struct cache_lru* cache, int key) {
+  struct cache_node* node = cache_lru_find(cache, key);
 
-    while (1) {
-        Hashmap *currentPair = hashmap[(hash1 + i * hash2) % M];
-        if (currentPair == NULL) {
-            return NULL;
-        }
-        if (currentPair->key == key) {
-            return currentPair;
-        }
-        i++;
-    }
-}
-
-// Inserting into a hash table
-void insert_hash(int key, Hashmap **hashmap, Hashmap *pair, int M) {
-    int hash1 = hash_one(key, M);
-    int index = hash1;
-
-    if (hashmap[index] != NULL) {
-        int index2 = hash_two(key, M);
-        int i = 0;
-        while (1) {
-            int newIndex = (index + i * index2) % M;
-            if (hashmap[newIndex] == NULL) {
-                hashmap[newIndex] = pair;
-                break;
-            }
-            i++;
-        }
-    } else {
-        hashmap[index] = pair;
-    }
-}
-
-// Removing from a hash table
-void remove_hash(int key, Hashmap **hashmap, int M) {
-    int hash1 = hash_one(key, M);
-    int hash2 = hash_two(key, M);
-    int i = 0;
-    while (1) {
-        Hashmap *currentPair = hashmap[(hash1 + i * hash2) % M];
-        if (currentPair == NULL) {
-            return;
-        }
-        if (currentPair->key == key) {
-            hashmap[(hash1 + i * hash2) % M] = NULL;
-        }
-        i++;
-    }
-}
-
-// Removing a node from the cache
-void delete_node(struct cache_lru *cache, struct Node *rm) {
-    if (rm == NULL) return;
-    
-    if (rm->prev != NULL) {
-        rm->prev->next = rm->next;
-    } else {
-        cache->head = rm->next;
-    }
-
-    if (rm->next != NULL) {
-        rm->next->prev = rm->prev;
-    } else {
-        cache->tail = rm->prev;
-    }
-}
-
-// Adding a node to the beginning of the list
-void put_on_top(struct cache_lru *cache, struct Node *newNode) {
-    newNode->next = cache->head;
-    newNode->prev = NULL;
-
-    if (cache->head != NULL) {
-        cache->head->prev = newNode;
-    }
-
-    cache->head = newNode;
-
-    if (cache->tail == NULL) {
-        cache->tail = newNode;
-    }
-}
-
-// Function for creating a cache
-struct cache_lru *cache_lru_create(int capacity) {
-    struct cache_lru *cache = (struct cache_lru *)malloc(sizeof(struct cache_lru));
-    cache->capacity = capacity;
-    cache->size = 0;
-    cache->head = NULL;
-    cache->tail = NULL;
-    
-    cache->map_size = capacity * 2;
-    cache->map = (Hashmap **)malloc(sizeof(Hashmap *) * cache->map_size);
-    init_table(cache->map, cache->map_size);
-    
-    return cache;
-}
-
-// Destroying the cache
-void cache_lru_destroy(struct cache_lru **cache) {
-    free(*cache);
-    *cache = NULL;
-}
-
-// Function for adding an element to the cache
-void cache_lru_put(struct cache_lru *cache, int key, int value) {
-    Hashmap *currentHash = get(key, cache->map, cache->map_size);
-
-    if (currentHash != NULL) {
-        currentHash->node->value = value;
-        delete_node(cache, currentHash->node);
-        put_on_top(cache, currentHash->node);
-    } else {
-        if (cache->size >= cache->capacity) {
-            remove_hash(cache->tail->key, cache->map, cache->map_size);
-            delete_node(cache, cache->tail);
-            cache->size--;
-        }
-        struct Node *newNode = (struct Node *)malloc(sizeof(struct Node));
-        newNode->key = key;
-        newNode->value = value;
-        newNode->next = NULL;
-        newNode->prev = NULL;
-        
-        Hashmap *hash = (Hashmap *)malloc(sizeof(Hashmap));
-        hash->key = key;
-        hash->node = newNode;
-        
-        insert_hash(key, cache->map, hash, cache->map_size);
-        put_on_top(cache, newNode);
-        cache->size++;
-    }
-}
-
-// Function for getting an element from the cache
-int cache_lru_get(struct cache_lru *cache, int key) {
-    Hashmap *currentHash = get(key, cache->map, cache->map_size);
-    
-    if (currentHash != NULL) {
-        delete_node(cache, currentHash->node);
-        put_on_top(cache, currentHash->node);
-        return currentHash->node->value;
-    } else {
-        return -1;
-    }
+  if (node) {
+    // Move to front of LRU list
+    list_del(&node->lru_list);
+    list_add(&node->lru_list, &cache->lru_head);
+    return node->value;
+  } else {
+    return -1;  // Key not found
+  }
 }
